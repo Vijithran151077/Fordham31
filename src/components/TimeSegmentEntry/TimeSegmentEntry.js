@@ -1,0 +1,610 @@
+import React, { useState, useEffect } from 'react';
+import { useTheme } from '../../contexts/ThemeContext';
+import {
+  Box,
+  Card,
+  CardContent,
+  TextField,
+  Button,
+  Typography,
+  IconButton,
+  Grid,
+  Alert,
+  Chip,
+  Divider
+} from '@mui/material';
+import {
+  Add as AddIcon,
+  Delete as DeleteIcon,
+  AccessTime as TimeIcon,
+  Lock as LockIcon,
+  LockOpen as UnlockIcon,
+  Warning as WarningIcon,
+  CheckCircle as CheckIcon
+} from '@mui/icons-material';
+import {
+  validateSegmentsEditability,
+  getTimeRestrictions
+} from '../../services/appScriptAPI';
+import ScheduleChangeWarning from '../ScheduleChangeWarning/ScheduleChangeWarning';
+import { useAuth } from '../../contexts/AuthContext';
+import CustomTimePicker from '../CustomTimePicker/CustomTimePicker';
+import { formatTime12Hour } from '../../utils/timeFormat';
+
+const TimeSegmentEntry = ({ onSubmit, existingSegments = [], loading = false, shiftDate = null, scheduleStatus = 'draft' }) => {
+  const { user } = useAuth();
+  const { isDarkMode } = useTheme();
+  const [segments, setSegments] = useState(
+    existingSegments.length > 0
+      ? existingSegments.map(seg => ({
+        startTime: seg.startTime || '',
+        endTime: seg.endTime || '',
+        id: seg.id || Date.now() + Math.random()
+      }))
+      : [{ startTime: '', endTime: '', id: Date.now() }]
+  );
+  const [errors, setErrors] = useState([]);
+  const [isScheduleLocked, setIsScheduleLocked] = useState(scheduleStatus === 'locked' || scheduleStatus === 'completed');
+  const [showWarningDialog, setShowWarningDialog] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Mobile Custom Picker State
+  const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
+  const [showMobileTimePicker, setShowMobileTimePicker] = useState(false);
+  const [pickerConfig, setPickerConfig] = useState({ id: null, field: null, initialTime: '' });
+
+  // Mobile detection listener
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobileView(window.innerWidth < 768);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // Check time restrictions and editability on component mount and when segments change
+  useEffect(() => {
+    // Time restrictions are disabled, but keeping the structure for future use
+    getTimeRestrictions(shiftDate);
+
+    if (segments.length > 0 && segments.some(seg => seg.startTime && seg.endTime)) {
+      validateSegmentsEditability(segments, shiftDate);
+    }
+  }, [segments, shiftDate]);
+
+  const isSegmentEditable = (segment) => {
+    // SIMPLIFIED: Only check schedule lock status, ignore time-based restrictions
+    if (isScheduleLocked && !isEditing) return false;
+    return true; // Always allow editing if schedule is not locked
+  };
+
+  const handleFixTiming = () => {
+    if (validateSegments()) {
+      setIsScheduleLocked(true);
+      setIsEditing(false);
+      // Call parent with locked status
+      handleSubmit(true); // true indicates schedule should be locked
+    }
+  };
+
+  const handleRevealSlots = () => {
+    setShowWarningDialog(true);
+  };
+
+  const handleWarningConfirm = () => {
+    setShowWarningDialog(false);
+    setIsEditing(true);
+    setIsScheduleLocked(false);
+    // This will be tracked in the database
+  };
+
+  const handleWarningCancel = () => {
+    setShowWarningDialog(false);
+  };
+
+  const addNewSegment = () => {
+    setSegments([...segments, {
+      startTime: '',
+      endTime: '',
+      id: Date.now() + Math.random()
+    }]);
+  };
+
+  const removeSegment = (id) => {
+    if (segments.length > 1) {
+      setSegments(segments.filter(seg => seg.id !== id));
+    }
+  };
+
+  const updateSegment = (id, field, value) => {
+    const segment = segments.find(seg => seg.id === id);
+    if (!isSegmentEditable(segment)) {
+      return; // Prevent editing of non-editable segments
+    }
+
+    setSegments(segments.map(seg =>
+      seg.id === id ? { ...seg, [field]: value } : seg
+    ));
+    // Clear errors when user starts typing
+    setErrors([]);
+  };
+
+  // Mobile Picker Handlers
+  const handleMobileTimeClick = (id, field, currentTime) => {
+    if (isMobileView) {
+      const segment = segments.find(seg => seg.id === id);
+      if (!isSegmentEditable(segment)) return;
+
+      setPickerConfig({
+        id,
+        field,
+        initialTime: currentTime
+      });
+      setShowMobileTimePicker(true);
+    }
+  };
+
+  const handleMobileTimeConfirm = (timeString) => {
+    if (pickerConfig.id && pickerConfig.field) {
+      updateSegment(pickerConfig.id, pickerConfig.field, timeString);
+    }
+    setShowMobileTimePicker(false);
+    setPickerConfig({ id: null, field: null, initialTime: '' });
+  };
+
+  const handleMobileTimeCancel = () => {
+    setShowMobileTimePicker(false);
+    setPickerConfig({ id: null, field: null, initialTime: '' });
+  };
+
+  const validateSegments = () => {
+    const newErrors = [];
+
+    segments.forEach((segment, index) => {
+      // Check if both start and end times are provided
+      if (!segment.startTime || !segment.endTime) {
+        newErrors.push(`Segment ${index + 1}: Both start and end times are required`);
+        return;
+      }
+
+      // Check if end time is after start time (allow cross-midnight shifts)
+      const start = new Date(`1970-01-01T${segment.startTime}:00`);
+      const end = new Date(`1970-01-01T${segment.endTime}:00`);
+
+      // Calculate duration using the same logic as backend (handles cross-midnight)
+      let diffMs = end - start;
+      if (diffMs < 0) {
+        diffMs += 24 * 60 * 60 * 1000; // Handle overnight shifts by adding 24 hours
+      }
+      const duration = diffMs / (1000 * 60 * 60);
+
+      if (duration <= 0 || duration >= 24) {
+        newErrors.push(`Segment ${index + 1}: Invalid time range (must be within 24 hours)`);
+      }
+
+      // REMOVED: Time restrictions for today's segments - now allows any time
+    });
+
+    // Check for overlapping segments
+    for (let i = 0; i < segments.length - 1; i++) {
+      for (let j = i + 1; j < segments.length; j++) {
+        const seg1 = segments[i];
+        const seg2 = segments[j];
+
+        if (!seg1.startTime || !seg1.endTime || !seg2.startTime || !seg2.endTime) continue;
+
+        const start1 = new Date(`1970-01-01T${seg1.startTime}:00`);
+        const end1 = new Date(`1970-01-01T${seg1.endTime}:00`);
+        const start2 = new Date(`1970-01-01T${seg2.startTime}:00`);
+        const end2 = new Date(`1970-01-01T${seg2.endTime}:00`);
+
+        if ((start1 < end2 && end1 > start2)) {
+          newErrors.push(`Segments ${i + 1} and ${j + 1} overlap`);
+        }
+      }
+    }
+
+    setErrors(newErrors);
+    return newErrors.length === 0;
+  };
+
+  const calculateTotalHours = () => {
+    return segments.reduce((total, segment) => {
+      if (segment.startTime && segment.endTime) {
+        const start = new Date(`1970-01-01T${segment.startTime}:00`);
+        const end = new Date(`1970-01-01T${segment.endTime}:00`);
+        const diffMs = end - start;
+        if (diffMs > 0) {
+          return total + (diffMs / (1000 * 60 * 60));
+        }
+      }
+      return total;
+    }, 0);
+  };
+
+  const handleSubmit = (shouldLock = false) => {
+    if (validateSegments()) {
+      const validSegments = segments
+        .filter(seg => seg.startTime && seg.endTime)
+        .map((seg, index) => ({
+          segmentId: index + 1,
+          startTime: seg.startTime,
+          endTime: seg.endTime,
+          duration: (() => {
+            try {
+              const start = new Date(`1970-01-01T${seg.startTime}:00`);
+              const end = new Date(`1970-01-01T${seg.endTime}:00`);
+              let diffMs = end - start;
+
+              // Handle overnight shifts
+              if (diffMs < 0) {
+                diffMs += 24 * 60 * 60 * 1000;
+              }
+
+              const hours = diffMs / (1000 * 60 * 60);
+              console.log(`📊 Segment duration: ${seg.startTime} to ${seg.endTime} = ${hours.toFixed(2)} hours`);
+              return Math.round(hours * 100) / 100; // Round to 2 decimal places
+            } catch (error) {
+              console.error('Error calculating segment duration:', error);
+              return 0;
+            }
+          })()
+        }));
+
+      // Pass schedule status information to parent
+      onSubmit(validSegments, {
+        shouldLock,
+        isScheduleChange: isEditing,
+        previousStatus: scheduleStatus
+      });
+    }
+  };
+
+  return (
+    <Card
+      className="card"
+      sx={{
+        bgcolor: isDarkMode ? '#1e1e1e' : 'background.paper',
+        color: isDarkMode ? '#fff' : 'inherit',
+        border: isDarkMode ? '1px solid #333' : 'none',
+        boxShadow: isDarkMode ? '0 4px 20px rgba(0,0,0,0.5)' : 1
+      }}
+    >
+      <CardContent>
+        <Box sx={{ mb: 3 }}>
+          {/* Title Row */}
+          <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+            <TimeIcon sx={{ mr: 1, color: 'primary.main' }} />
+            <Typography variant="h6" sx={{ flexGrow: 1, color: isDarkMode ? '#00d9ff' : 'inherit' }}>
+              Time Segments Entry
+            </Typography>
+          </Box>
+
+          {/* Information Note */}
+          <Alert severity="info" sx={{
+            mb: 2,
+            fontSize: '0.875rem',
+            bgcolor: isDarkMode ? 'rgba(3, 169, 244, 0.1)' : 'info.lighter',
+            color: isDarkMode ? '#b3e5fc' : 'info.dark',
+            '& .MuiAlert-icon': {
+              color: isDarkMode ? '#03a9f4' : 'info.main'
+            }
+          }}>
+            <Typography variant="body2" sx={{ color: 'inherit' }}>
+              <strong>Note:</strong> You can only have one active or completed shift per day.
+              If you need to modify an existing shift, please use the History tab to edit your times.
+            </Typography>
+          </Alert>
+
+          {/* Status Chips Row - Stack on Mobile */}
+          <Box sx={{
+            display: 'flex',
+            gap: 1,
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            '& > *': { flexShrink: 0 } // Prevent chips from shrinking
+          }}>
+            {isScheduleLocked ? (
+              <Chip
+                label="Schedule Locked"
+                color="success"
+                size="small"
+                icon={<LockIcon />}
+              />
+            ) : (
+              <Chip
+                label="Draft Mode"
+                color="warning"
+                size="small"
+                icon={<UnlockIcon />}
+              />
+            )}
+            <Chip
+              label={`Total: ${(calculateTotalHours() || 0).toFixed(2)} hours`}
+              color="primary"
+              variant="outlined"
+            />
+          </Box>
+        </Box>
+
+        {errors.length > 0 && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            <ul style={{ margin: 0, paddingLeft: '20px' }}>
+              {errors.map((error, index) => (
+                <li key={index}>{error}</li>
+              ))}
+            </ul>
+          </Alert>
+        )}
+
+        {isScheduleLocked && !isEditing && (
+          <Alert severity="info" sx={{ mb: 2 }} icon={<CheckIcon />}>
+            Your schedule is locked and secured. Click "Reveal Slots" if you need to make changes.
+          </Alert>
+        )}
+
+        {isEditing && (
+          <Alert severity="warning" sx={{ mb: 2 }} icon={<WarningIcon />}>
+            Schedule editing mode is active. All changes will be tracked in the database.
+          </Alert>
+        )}
+
+        {segments.map((segment, index) => {
+          const segmentEditable = isSegmentEditable(segment);
+
+          return (
+            <Box key={segment.id} sx={{ mb: 2 }}>
+              <Box sx={{
+                display: 'flex',
+                alignItems: 'center',
+                mb: 1,
+                flexWrap: 'wrap',
+                gap: 1
+              }}>
+                <Typography variant="subtitle2" sx={{
+                  minWidth: { xs: '80px', sm: '100px' },
+                  flexShrink: 0,
+                  color: isDarkMode ? '#ffc107' : 'text.primary',
+                  fontWeight: 'bold'
+                }}>
+                  Segment {index + 1}
+                </Typography>
+                {!segmentEditable && (
+                  <Chip
+                    label="Schedule Locked"
+                    size="small"
+                    color="warning"
+                    icon={<LockIcon />}
+                    sx={{ flexShrink: 0 }}
+                  />
+                )}
+                {segments.length > 1 && segmentEditable && (
+                  <IconButton
+                    size="small"
+                    onClick={() => removeSegment(segment.id)}
+                    color="error"
+                    sx={{
+                      ml: { xs: 0, sm: 'auto' },
+                      order: { xs: 3, sm: 0 },
+                      width: { xs: '100%', sm: 'auto' },
+                      justifyContent: { xs: 'flex-end', sm: 'center' }
+                    }}
+                  >
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                )}
+              </Box>
+
+              <Grid container spacing={2}>
+                <Grid item xs={12} sm={6}>
+                  {isMobileView ? (
+                    <Box
+                      onClick={() => handleMobileTimeClick(segment.id, 'startTime', segment.startTime)}
+                      sx={{
+                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.23)' : '1px solid rgba(0, 0, 0, 0.23)',
+                        borderRadius: '4px',
+                        padding: '8.5px 14px',
+                        cursor: segmentEditable ? 'pointer' : 'default',
+                        backgroundColor: (isScheduleLocked && !isEditing)
+                          ? (isDarkMode ? '#343a40' : '#f5f5f5')
+                          : (isDarkMode ? '#2c2c2c' : 'transparent'),
+                        '&:hover': {
+                          borderColor: segmentEditable ? (isDarkMode ? 'primary.main' : 'text.primary') : (isDarkMode ? 'rgba(255, 255, 255, 0.23)' : 'rgba(0, 0, 0, 0.23)')
+                        },
+                        display: 'flex',
+                        flexDirection: 'column'
+                      }}
+                    >
+                      <Typography variant="caption" sx={{ color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'text.secondary', fontSize: '0.75rem' }}>
+                        Start Time
+                      </Typography>
+                      <Typography variant="body1" sx={{ color: isDarkMode ? '#fff' : 'inherit' }}>
+                        {formatTime12Hour(segment.startTime) || 'Select time'}
+                      </Typography>
+                    </Box>
+                  ) : (
+                    <TextField
+                      fullWidth
+                      label="Start Time"
+                      type="time"
+                      value={segment.startTime}
+                      onChange={(e) => updateSegment(segment.id, 'startTime', e.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      disabled={loading || (isScheduleLocked && !isEditing)}
+                      size="small"
+                      sx={{
+                        '& .MuiInputBase-input': {
+                          backgroundColor: (isScheduleLocked && !isEditing)
+                            ? (isDarkMode ? '#343a40' : '#f5f5f5')
+                            : 'transparent',
+                          color: isDarkMode ? '#fff' : 'inherit'
+                        },
+                        '& .MuiInputLabel-root': {
+                          color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'inherit'
+                        },
+                        '& .MuiOutlinedInput-root': {
+                          '& fieldset': {
+                            borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.23)' : 'inherit'
+                          },
+                          '&:hover fieldset': {
+                            borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.5)' : 'inherit'
+                          }
+                        }
+                      }}
+                    />
+                  )}
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  {isMobileView ? (
+                    <Box
+                      onClick={() => handleMobileTimeClick(segment.id, 'endTime', segment.endTime)}
+                      sx={{
+                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.23)' : '1px solid rgba(0, 0, 0, 0.23)',
+                        borderRadius: '4px',
+                        padding: '8.5px 14px',
+                        cursor: segmentEditable ? 'pointer' : 'default',
+                        backgroundColor: (isScheduleLocked && !isEditing)
+                          ? (isDarkMode ? '#343a40' : '#f5f5f5')
+                          : (isDarkMode ? '#2c2c2c' : 'transparent'),
+                        '&:hover': {
+                          borderColor: segmentEditable ? (isDarkMode ? 'primary.main' : 'text.primary') : (isDarkMode ? 'rgba(255, 255, 255, 0.23)' : 'rgba(0, 0, 0, 0.23)')
+                        },
+                        display: 'flex',
+                        flexDirection: 'column'
+                      }}
+                    >
+                      <Typography variant="caption" sx={{ color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'text.secondary', fontSize: '0.75rem' }}>
+                        End Time
+                      </Typography>
+                      <Typography variant="body1" sx={{ color: isDarkMode ? '#fff' : 'inherit' }}>
+                        {formatTime12Hour(segment.endTime) || 'Select time'}
+                      </Typography>
+                    </Box>
+                  ) : (
+                    <TextField
+                      fullWidth
+                      label="End Time"
+                      type="time"
+                      value={segment.endTime}
+                      onChange={(e) => updateSegment(segment.id, 'endTime', e.target.value)}
+                      InputLabelProps={{ shrink: true }}
+                      disabled={loading || (isScheduleLocked && !isEditing)}
+                      size="small"
+                      sx={{
+                        '& .MuiInputBase-input': {
+                          backgroundColor: (isScheduleLocked && !isEditing)
+                            ? (isDarkMode ? '#343a40' : '#f5f5f5')
+                            : 'transparent',
+                          color: isDarkMode ? '#fff' : 'inherit'
+                        },
+                        '& .MuiInputLabel-root': {
+                          color: isDarkMode ? 'rgba(255, 255, 255, 0.7)' : 'inherit'
+                        },
+                        '& .MuiOutlinedInput-root': {
+                          '& fieldset': {
+                            borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.23)' : 'inherit'
+                          },
+                          '&:hover fieldset': {
+                            borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.5)' : 'inherit'
+                          }
+                        }
+                      }}
+                    />
+                  )}
+                </Grid>
+              </Grid>
+
+              {index < segments.length - 1 && <Divider sx={{ mt: 2 }} />}
+            </Box>
+          );
+        })}
+
+        <Box sx={{
+          display: 'flex',
+          gap: 1,
+          mt: 3,
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          '& > button': {
+            minWidth: 'fit-content',
+            flexShrink: 0
+          }
+        }}>
+          <Button
+            variant="outlined"
+            startIcon={<AddIcon />}
+            onClick={addNewSegment}
+            disabled={
+              loading ||
+              (isScheduleLocked && !isEditing)
+            }
+            size="small"
+          >
+            Add Segment
+          </Button>
+
+          {!isScheduleLocked && (
+            <Button
+              variant="contained"
+              color="success"
+              startIcon={<LockIcon />}
+              onClick={handleFixTiming}
+              disabled={
+                loading ||
+                segments.some(seg => !seg.startTime || !seg.endTime)
+              }
+              size="small"
+            >
+              Fix Timing
+            </Button>
+          )}
+
+          {isScheduleLocked && !isEditing && (
+            <Button
+              variant="outlined"
+              color="warning"
+              startIcon={<UnlockIcon />}
+              onClick={handleRevealSlots}
+              disabled={loading}
+              size="small"
+            >
+              Reveal Slots
+            </Button>
+          )}
+        </Box>
+
+        <Box sx={{ mt: 2 }}>
+          <Typography variant="caption" sx={{
+            display: 'block',
+            lineHeight: 1.4,
+            wordBreak: 'break-word',
+            color: isDarkMode ? 'rgba(255, 255, 255, 0.6)' : 'text.secondary'
+          }}>
+            💡 Tip: You can add multiple work segments for the same day (e.g., morning shift + evening shift)
+            <br />📝 Note: Use "Fix Timing" to lock your schedule, or "Reveal Slots" to edit locked schedules.
+          </Typography>
+        </Box>
+      </CardContent>
+
+      <ScheduleChangeWarning
+        open={showWarningDialog}
+        onConfirm={handleWarningConfirm}
+        onCancel={handleWarningCancel}
+        userName={user?.name || 'User'}
+      />
+
+      {/* Mobile Custom Time Picker */}
+      {showMobileTimePicker && (
+        <CustomTimePicker
+          title={pickerConfig.field === 'startTime' ? 'Start Time' : 'End Time'}
+          initialTime={pickerConfig.initialTime}
+          onConfirm={handleMobileTimeConfirm}
+          onCancel={handleMobileTimeCancel}
+        />
+      )}
+    </Card>
+  );
+};
+
+export default TimeSegmentEntry;
